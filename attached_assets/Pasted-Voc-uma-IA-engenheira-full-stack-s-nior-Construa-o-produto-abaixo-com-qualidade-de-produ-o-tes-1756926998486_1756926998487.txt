@@ -1,0 +1,371 @@
+Você é uma IA engenheira full-stack sênior. Construa o produto abaixo com qualidade de produção, testes, documentação e deploy automatizado.
+
+# Produto
+Nome: **Unify** – Virtual Business Card + Link-in-bio com NFC, Wallets e analytics avançado.
+
+## Objetivo
+Permitir que pessoas e empresas criem um “cartão de visita” digital (página estilo Linktree) com:
+- leitura/gravação NFC para cartões físicos,
+- integração com Apple Wallet e Google Wallet,
+- rastreamento avançado (UTM, Meta Pixel, Google Tags/GTM),
+- webhooks,
+- métricas em tempo real,
+- login com Google e e-mail/senha.
+
+A experiência deve ser fluida no **mobile app (iOS/Android)** e na **web** (perfil público + dashboard).
+
+---
+
+# Arquitetura (recomendada, mas você pode ajustar se houver alternativa melhor)
+- **Front-end Web**: Next.js 14 (App Router, Server Actions), Tailwind, shadcn/ui, React Hook Form + Zod, TanStack Query.
+- **Mobile**: Expo (React Native) + `react-native-nfc-manager` (Android/iOS), `expo-router`, `expo-auth-session`.
+  - Nota iOS: NFC write/read requer “NFC Tag Reading” capability e uso de CoreNFC via lib; rodar com Dev Client (não em Expo Go).
+- **Back-end**: Supabase (Auth Google + Email/Password, Postgres, Row Level Security, Storage, Edge Functions), ou NestJS+Prisma se preferir rodar fora.
+- **Analytics**: coleta própria (pageviews, cliques, scans NFC, add-to-wallet), + campos para injetar Meta Pixel ID, Google Tag/GTMs por perfil (inclusão segura no `<head>`).
+- **Filas/eventos**: Supabase Functions (Edge) + cron (daily rollups). Opcional: QStash/Cron.
+- **Webhooks**: assinatura por usuário (URL + secret). Reenvio com backoff exponencial, assinatura HMAC-SHA256.
+- **Infra**: Vercel (Web) + Supabase (DB/Auth/Functions) + Expo EAS (mobile) + Storage Supabase (imagens de perfil, fundos).
+- **CI/CD**: GitHub Actions (lint, typecheck, tests, build). EAS para mobile.
+
+---
+
+# Domínios e apps
+- Web app (dashboard): `app.unify.cc`
+- Páginas públicas de perfil: `unify.cc/@username` (custom domain opcional: CNAME)
+- API/SSR hospedada no Next/Vercel
+- Apps: iOS e Android publicados como “Unify – Smart Card”
+
+---
+
+# Funcionalidades (MVP+)
+1. **Onboarding e Login**
+   - Login com Google e e-mail/senha.
+   - Ao concluir cadastro, mostrar animação “aproxime seu cartão NFC”.
+   - Se o dispositivo suportar NFC, abrir fluxo de leitura/gravação.
+
+2. **Perfis (Link-in-bio)**
+   - Campos: nome, e-mail, telefone, endereço, bio, foto, links sociais (Instagram, WhatsApp, LinkedIn, Facebook, YouTube, X), websites, CTA principal (“Exchange Contact”), equipe (cards com foto/nome/cargo/links).
+   - Personalização: cores (primária/secundária), imagem de fundo, tipografia (3 presets), estilo da foto (redondo/quadrado/quadrado com cantos), alinhamento (esq/centro/dir), bordas (3 presets), estilos de containers (flat/elevado/outlined).
+   - SEO/OG: título, descrição, imagem OG dinâmica (Satori/OG Image).
+   - Slug único `@username`. Verificação de disponibilidade em tempo real.
+   - Opção de **salvar contato (vCard .vcf)** e **baixar QR Code**.
+
+3. **NFC**
+   - **Gravação**: escrever um NDEF com o URL do perfil público (ex.: `https://unify.cc/@lucy`).
+   - **Leitura**: detectar cartões compatíveis e abrir o link.
+   - UI para “Escrever novamente” e verificar.
+   - iOS: respeitar limitações do CoreNFC (NDEF write em tags suportadas); Android: amplo suporte.
+
+4. **Carteiras (Wallet)**
+   - Gerar “Pass” com QR (Apple Wallet – PKPass) e “Google Wallet pass”.
+   - Conteúdo do pass: foto, nome, cargo/empresa (opcional), QR/URL do perfil, botões sociais (links).
+   - Endpoint para atualizar imagem/cores e invalidar pass se usuário desabilitar.
+
+5. **Rastreamento avançado**
+   - Aceitar **UTMs** em qualquer acesso ao perfil; persistir na sessão (cookie) e propagar para links de saída.
+   - **Pixels/Tags por perfil**: campos para Meta Pixel ID, Google Tag ID (medir via gtag.js) ou container GTM; injetar com consent gating (LGPD), sandboxed e com “allowlist” de origens.
+   - **Área dedicada** no dashboard para colar scripts de head (com sanitização: CSP + DOMPurify + nonce).
+
+6. **Métricas & Analytics**
+   - Eventos: pageview, click em cada link, scan NFC (write/read), add-to-wallet, save-contact (vCard), compartilhamento.
+   - Dashboard com gráficos (line/bar) e tabelas: visitantes, CTR por link, origem (referrer/utm_source), dispositivos, regiões.
+   - Filtros por data, UTM, página, dispositivo.
+   - Agregações diárias e export CSV.
+
+7. **Webhooks**
+   - Eventos: `profile.viewed`, `link.clicked`, `nfc.scanned`, `wallet.added`, `contact.saved`.
+   - Configuração: URL, Secret, “test ping”. Assinatura `X-Unify-Signature: sha256=...`.
+   - Retentativas: 5 tentativas (backoff), DLQ visual no dashboard.
+
+8. **QR Code**
+   - Geração de QR para o perfil e download PNG/SVG.
+   - Página “/qr/@username” com modo full-screen.
+
+9. **Acessibilidade e i18n**
+   - A11y WCAG 2.1 AA, teclado e leitores de tela.
+   - i18n ready (pt-BR default, en-US opcional).
+
+10. **Segurança & LGPD**
+    - RLS por `user_id`.
+    - Sanitização de scripts de terceiros (CSP, nonce).
+    - Consent banner (cookies/pixels).
+    - Logs de auditoria básicos.
+
+---
+
+# Modelos de dados (Postgres/Supabase – SQL)
+Crie tabelas com RLS habilitado (somente dono pode ler/escrever, perfis públicos para leitura pública onde indicado).
+
+```sql
+-- users é do auth
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  username text unique not null check (username ~ '^[a-z0-9_\\.]{3,30}$'),
+  display_name text,
+  email text,
+  phone text,
+  address text,
+  bio text,
+  photo_url text,
+  theme jsonb default '{}'::jsonb,          -- {primary, secondary, bgImage, font, avatarStyle, align, borderStyle, containerStyle}
+  socials jsonb default '{}'::jsonb,        -- {instagram, whatsapp, linkedin, facebook, youtube, x, website1, website2}
+  seo jsonb default '{}'::jsonb,            -- {title, description}
+  pixels jsonb default '{}'::jsonb,         -- {meta_pixel_id, gtag_id, gtm_id, custom_head}
+  is_public boolean default true,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create table public.links (
+  id uuid primary key default gen_random_uuid(),
+  profile_id uuid references public.profiles(id) on delete cascade,
+  title text not null,
+  url text not null,
+  position int not null default 0,
+  enabled boolean default true,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create table public.events (
+  id bigserial primary key,
+  profile_id uuid not null,
+  event_type text not null,                  -- pageview|link.click|nfc.scan|wallet.add|contact.save
+  link_id uuid,
+  utm jsonb,                                 -- {source,medium,campaign,term,content}
+  referrer text,
+  ip inet,
+  user_agent text,
+  country text,
+  device text,
+  created_at timestamptz default now()
+);
+
+create table public.webhooks (
+  id uuid primary key default gen_random_uuid(),
+  profile_id uuid references public.profiles(id) on delete cascade,
+  url text not null,
+  secret text not null,
+  enabled boolean default true,
+  created_at timestamptz default now()
+);
+
+create table public.webhook_deliveries (
+  id bigserial primary key,
+  webhook_id uuid references public.webhooks(id) on delete cascade,
+  event_id bigint,
+  status int,
+  attempt int,
+  response_ms int,
+  error text,
+  created_at timestamptz default now()
+);
+RLS:
+
+profiles: select pública quando is_public = true (somente colunas seguras); insert/update/delete somente auth.uid() = id.
+
+links, webhooks: somente dono.
+
+events: insert livre via Edge Function (chave de serviço), select agregado via view/materialized view.
+
+Endpoints/Functions
+POST /api/events (Edge Function) → valida origem, extrai UTM/referrer/IP/UA e insere em events.
+
+POST /api/webhooks/dispatch (cron/internal) → envia pendências com HMAC; backoff.
+
+GET /api/og/@username → OG image dinâmica.
+
+GET /api/qr/@username → retorna PNG/SVG.
+
+GET /api/vcard/@username → gera .vcf (N:;TEL;EMAIL;ORG;TITLE;ADR;URL).
+
+POST /api/wallet/apple / POST /api/wallet/google → cria passes (usar libs PKPass/Google Wallet Objects).
+
+POST /api/nfc/validate (opcional) → valida tag/URL.
+
+Fluxos principais (UX)
+Onboarding
+
+Tela 1: criar conta (Google / e-mail+senha).
+
+Tela 2: animação “Aproxime seu cartão NFC”.
+
+Se NFC disponível → botões: “Ler cartão” | “Escrever meu link”.
+
+Tela 3: Criar Perfil (nome, e-mail, foto, sociais, CTA, tema).
+
+Tela 4: Preview e “Gravar no cartão” → inicia escrita NDEF com URL do perfil.
+
+Tela 5: Sugestão “Adicionar à Wallet” + “Gerar QR”.
+
+Dashboard
+
+Abas: Perfil | Links | Design | Pixels & Tags | Métricas | Webhooks | Carteiras | NFC.
+
+“Pixels & Tags”: campos validados; botão “Validar instalação” (fogo de teste via evento).
+
+“Métricas”: gráficos por período, tabela de top links, filtros de UTM.
+
+Exportar CSV e Webhooks “Send test”.
+
+Página pública do perfil
+
+Layout inspirado nas referências (cards, avatars e CTA “Exchange Contact”).
+
+Botões sociais, sessão “Nossa Equipe” (opcional).
+
+Botão “Salvar Contato” (vCard).
+
+Banner de consentimento (LGPD) para ativar pixels.
+
+Injeção de UTM em todos os links de saída.
+
+NFC – detalhes técnicos
+Android: react-native-nfc-manager com Ndef.writeUriRecord(profileUrl).
+
+iOS: habilitar capability “NFC Tag Reading”, usar NfcManager.requestTechnology(NfcTech.Ndef) e Ndef.writeNdefMessage. Garantir mensagens de erro claras para tags bloqueadas/RO.
+
+Testes: simular ausência de NFC; tratar cancelamentos; confirmação pós-escrita.
+
+Wallets – detalhes técnicos
+Apple Wallet (PKPass): gerar PKPass server-side (Next API/Edge Function) com certificados (.p12) e assets (logo/background). Campos: name, title, org, QR (profile URL). Entregar .pkpass para “Adicionar”.
+
+Google Wallet: criar objeto via JWT “Save to Google Wallet” link (class/object). QR com URL.
+
+Métricas – implementação
+Client envia POST /api/events nos eventos chave. Use fetch “fire-and-forget” com keepalive.
+
+Enriquecimento server-side (IP→country com biblioteca local gratuita; UA→device).
+
+Views agregadas: events_daily(profile_id, date, pageviews, clicks, ctr, …).
+
+Injeção de Pixels/Tags (segura)
+Armazenar somente IDs (ex.: FB_PIXEL_ID, G-XXXX, GTM-XXXX).
+
+Render condicional do script com nonce alinhado à CSP:
+
+Content-Security-Policy: script-src 'self' 'nonce-<nonce>' https://connect.facebook.net https://www.googletagmanager.com https://www.google-analytics.com;
+
+“Custom Head” (campo de texto): sanitizar com DOMPurify server-side; bloquear <script src> externos fora de allowlist.
+
+Webhooks
+Payload padrão:
+
+json
+Copiar código
+{
+  "id":"evt_123",
+  "type":"link.clicked",
+  "created_at":"2025-01-01T12:00:00Z",
+  "data":{ "profile_id":"...", "link_id":"...", "utm":{...}, "referrer":"...", "ip":"...", "user_agent":"..." }
+}
+Assinar HMAC-SHA256(secret, rawBody), header X-Unify-Signature.
+
+Reenvio: 1s, 5s, 25s, 2m, 10m. Marcar DLQ se status >= 400 após 5 tentativas.
+
+Componentes (Web)
+Builder do perfil (preview ao vivo).
+
+Editor de temas (cores, tipografia, bordas, containers, alinhamento, fundo imagem).
+
+Gerador de QR + download.
+
+Métricas (Recharts).
+
+Área “Pixels & Tags” com validação dos IDs e botão “Verificar disparo”.
+
+Página pública responsiva (cards das inspirações anexadas).
+
+Telas (Mobile – Expo)
+Login/Onboarding + animação NFC.
+
+“Minha página” (preview).
+
+“Gravar no cartão” (ler/escrever NDEF).
+
+“Adicionar à Wallet”.
+
+Compartilhar QR.
+
+Métricas resumidas.
+
+Testes & Qualidade
+Unit tests (Vitest/Jest) para utils, API, Edge Functions.
+
+E2E (Playwright) para fluxo: criar conta → criar perfil → publicar → registrar evento.
+
+Contract tests para Webhooks (assinatura).
+
+Lint (ESLint) + Typescript strict + Zod validators.
+
+Entregáveis
+Repositório monorepo (pnpm workspaces): apps/web, apps/mobile, packages/ui, packages/config.
+
+Scripts pnpm dev, pnpm build, pnpm test.
+
+Seed script com usuário demo e 2 perfis de exemplo.
+
+README com setup (Supabase keys, Apple Wallet certs, Google Wallet), e passos de deploy (Vercel + EAS).
+
+Arquivos de ambiente .env.example:
+
+makefile
+Copiar código
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+WALLET_APPLE_CERT_P12_BASE64=
+WALLET_APPLE_CERT_PASSWORD=
+GOOGLE_WALLET_ISSUER_ID=
+GOOGLE_WALLET_SERVICE_ACCOUNT_JSON=
+CSP_NONCE_SECRET=
+Critérios de aceitação (MVP)
+ Usuário cria conta, cria perfil com foto, links e tema; página pública acessível por unify.cc/@username.
+
+ App mobile lê e escreve NDEF com URL do perfil em cartão NFC testado.
+
+ “Salvar contato” gera e baixa .vcf.
+
+ “Adicionar à Wallet” funciona em iOS (PKPass) e Android (Google Wallet).
+
+ Pixels Meta/Google disparam quando consentidos; UTMs persistem e propagam aos links.
+
+ Dashboard mostra pageviews, cliques por link e origem UTM, com filtro por data.
+
+ Webhooks entregam eventos com assinatura HMAC e retentativa.
+
+ QR code disponível para download e scan abre o perfil.
+
+ RLS/segurança ativas; CSP com nonce; LGPD banner.
+
+Tarefas (ordem sugerida)
+Scaffolding monorepo + Supabase init + auth (Google+email).
+
+Tabelas/Policies RLS e seeds.
+
+Web: builder de perfil + página pública + OG/QR/vCard endpoints.
+
+Eventos/analytics: Edge Function /api/events + dashboard.
+
+Pixels/UTM: coleta e injeção segura + consent banner.
+
+Webhooks: CRUD + dispatcher + DLQ.
+
+Mobile Expo: login + preview + NFC read/write + add-to-wallet.
+
+Wallets server-side (PKPass/Google) + endpoints.
+
+Polimento UI (shadcn/ui, temas), A11y, i18n.
+
+Testes E2E e docs, CI/CD e deploy.
+
+Observações finais
+Priorize DX (tipos, Zod schemas compartilhados).
+
+Forneça exemplos de tags NFC suportadas e mensagens de erro claras.
+
+Garanta fallback quando não houver NFC (mostrar QR/Wallet).
+
+Inclua migrações SQL e políticas RLS explícitas.
+
+Escreva README com GIFs do fluxo principal.
